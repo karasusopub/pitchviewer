@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<title>Pitch Viewer (Fixed Height + Scroll)</title>
+<title>Pitch Viewer (Fixed & Scrolled)</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <style>
   body { font-family: sans-serif; background: #222; color: #eee; margin:0; }
@@ -52,21 +52,20 @@
     transition: width 0.1s linear;
   }
 
-  /* 画面全体のレイアウト */
   #container {
     display: flex;
     flex-direction: column;
     height: calc(100vh - 180px);
   }
 
-  /* 横スクロール（時間軸）を担当するエリア */
+  /* 横スクロール（時間軸）エリア */
   #scrollAreaX {
     overflow-x: auto;
     width: 100%;
     touch-action: pan-x pan-y;
   }
 
-  /* タイムライン用のヘッダー（左側に鍵盤用の80pxの空白を作る） */
+  /* タイムラインヘッダー（左側にキーボード分の80pxを確保） */
   #timelineHeader {
     display: flex;
     flex-direction: row;
@@ -79,10 +78,10 @@
     background: #111;
   }
 
-  /* 【新規】上下スクロール（音高軸）を担当するエリア：高さを400pxに固定 */
+  /* 【上下スクロールエリア】高さを400pxに固定 */
   #scrollAreaY {
     overflow-y: auto;
-    max-height: 400px; /* ★ここでピアノロールの高さを固定（好みに合わせて変更可） */
+    max-height: 400px; /* ここでピアノロールの表示高さを固定 */
     display: flex;
     flex-direction: row;
     border-bottom: 2px solid #444;
@@ -104,10 +103,8 @@
     display: block;
   }
 
-  /* エラーグラフはピアノロールの下（スクロールの外）に配置 */
   #errorArea {
     width: 100%;
-    overflow-x: hidden; /* 上の横スクロールと同期させる場合は調整 */
   }
 </style>
 </head>
@@ -128,16 +125,13 @@
 <div id="progressContainer"><div id="progressBar"></div></div>
 
 <div id="container">
-  <!-- 横スクロールエリア -->
   <div id="scrollAreaX">
     
-    <!-- タイムライン部分（鍵盤の真上を避けて配置） -->
     <div id="timelineHeader">
       <div id="timelineSpacer"></div>
       <canvas id="timeline" height="40"></canvas>
     </div>
     
-    <!-- 【新規】上下スクロールエリア（鍵盤とピアノロールをセットでスクロール） -->
     <div id="scrollAreaY">
       <div id="keyboard"><canvas id="keys"></canvas></div>
       <div id="pianoWrapper">
@@ -145,7 +139,6 @@
       </div>
     </div>
 
-    <!-- エラーエリアも横幅を合わせるためここに入れる -->
     <div id="errorArea">
       <canvas id="error" height="200"></canvas>
     </div>
@@ -373,8 +366,10 @@ async function analyzeAudio(buffer) {
   drawPianoRoll();
   drawErrorGraph();
 
-  // 【自動スクロール】解析直後、自動的に真ん中の音域あたりにスクロールさせる
-  scrollAreaY.scrollTop = rollHeight / 2 - 200;
+  // 音符のある位置へ自動スクロール
+  const averageMidi = midiValues.reduce((a, b) => a + b, 0) / midiValues.length;
+  const targetY = (maxMidi - averageMidi) * rowHeight - 200;
+  scrollAreaY.scrollTop = Math.max(0, targetY);
 }
 
 playBtn.addEventListener("click", async () => {
@@ -498,14 +493,16 @@ function isBlackKey(midi) {
   return (n === 1 || n === 3 || n === 6 || n === 8 || n === 10);
 }
 
+// 【修正】高音（maxMidi）から低音（minMidi）へ順番に降順描画してズレを完全解消
 function drawKeyboard() {
   const names = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
 
   keysCtx.clearRect(0, 0, keysCanvas.width, keysCanvas.height);
   keysCtx.font = isMobile ? '10px sans-serif' : '12px sans-serif';
 
-  for (let m = minMidi; m <= maxMidi; m++) {
-    const y = (maxMidi - m) * rowHeight;
+  let rowCount = 0;
+  for (let m = maxMidi; m >= minMidi; m--) {
+    const y = rowCount * rowHeight;
     const name = names[m % 12];
 
     keysCtx.fillStyle = isBlackKey(m) ? '#2a2a2a' : '#555';
@@ -519,6 +516,7 @@ function drawKeyboard() {
       keysCtx.fillStyle = '#0af';
       keysCtx.fillText("C" + octave, 40, y + rowHeight - 4);
     }
+    rowCount++;
   }
 }
 
@@ -533,9 +531,11 @@ function drawTimeline() {
   }
 }
 
+// 【修正】高音（maxMidi）から低音（minMidi）へ降順描画して位置を完璧に統一
 function drawRollGrid() {
-  for (let m = minMidi; m <= maxMidi; m++) {
-    const y = (maxMidi - m) * rowHeight;
+  let rowCount = 0;
+  for (let m = maxMidi; m >= minMidi; m--) {
+    const y = rowCount * rowHeight;
 
     rollCtx.fillStyle = isBlackKey(m) ? "#2a2a2a" : "#1e1e1e";
     rollCtx.fillRect(0, y, rollCanvas.width, rowHeight);
@@ -545,6 +545,8 @@ function drawRollGrid() {
     rollCtx.moveTo(0, y);
     rollCtx.lineTo(rollCanvas.width, y);
     rollCtx.stroke();
+
+    rowCount++;
   }
 }
 
@@ -561,6 +563,7 @@ function drawPianoRoll() {
     const x2 = (n.end / timeMax) * rollCanvas.width;
     const w = x2 - x;
 
+    // ピアノロール上での描画位置計算（上から何番目のノートか）
     const y = (maxMidi - n.midi) * rowHeight;
 
     rollCtx.fillStyle = '#0af';
