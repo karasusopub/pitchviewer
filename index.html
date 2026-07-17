@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<title>Pitch Viewer (Mic + File + Mobile)</title>
+<title>Pitch Viewer (Mic + File + Mobile) - Fixed</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <style>
   body { font-family: sans-serif; background: #222; color: #eee; margin:0; }
@@ -21,6 +21,12 @@
     border: none;
     color: #fff;
     border-radius: 6px;
+    cursor: pointer;
+  }
+  #controls button:disabled {
+    background: #222;
+    color: #555;
+    cursor: not-allowed;
   }
 
   #recIndicator {
@@ -78,10 +84,7 @@
   }
 </style>
 </head>
-
-
-
-  <body>
+<body>
 
 <div id="controls">
   <button id="micStartBtn">🎤 録音開始</button>
@@ -108,15 +111,14 @@
   </div>
 </div>
 
-
-
-    <script>
+<script>
 let audioCtx = null;
 let audioBuffer = null;
 let sourceNode = null;
 let isPaused = false;
 let pauseOffset = 0;
 let startTime = 0;
+let animationId = null; // 【追加】再生ヘッドのアニメーション管理用
 
 let notes = [];
 let longNotes = [];
@@ -165,7 +167,7 @@ fileInput.addEventListener("change", async e => {
   const file = e.target.files[0];
   if (!file) return;
   const arrayBuffer = await file.arrayBuffer();
-  audioCtx = new AudioContext();
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
   analyzeAudio(audioBuffer);
 });
@@ -175,13 +177,19 @@ micStartBtn.addEventListener("click", async () => {
   micStopBtn.disabled = false;
 
   micChunks = [];
-  audioCtx = new AudioContext();
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 
-  micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  micRecorder = new MediaRecorder(micStream);
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    micRecorder = new MediaRecorder(micStream);
+  } catch (err) {
+    alert("マイクのアクセスに失敗しました: " + err.message);
+    micStartBtn.disabled = false;
+    micStopBtn.disabled = true;
+    return;
+  }
 
   micRecorder.ondataavailable = e => micChunks.push(e.data);
-
   micRecorder.start();
 
   recIndicator.style.display = "block";
@@ -191,7 +199,7 @@ micStartBtn.addEventListener("click", async () => {
   }, 500);
 
   setTimeout(() => {
-    if (micRecorder.state === "recording") micRecorder.stop();
+    if (micRecorder && micRecorder.state === "recording") micRecorder.stop();
   }, MIC_LIMIT);
 
   micRecorder.onstop = async () => {
@@ -203,6 +211,11 @@ micStartBtn.addEventListener("click", async () => {
     if (recBlinkInterval) {
       clearInterval(recBlinkInterval);
       recBlinkInterval = null;
+    }
+
+    // ストリームのトラックをすべて停止してマイクの使用中アイコンを消す
+    if (micStream) {
+      micStream.getTracks().forEach(track => track.stop());
     }
 
     const blob = new Blob(micChunks, { type: "audio/webm" });
@@ -220,9 +233,10 @@ micStopBtn.addEventListener("click", () => {
 });
 
 async function analyzeAudio(buffer) {
-  playBtn.disabled = false;
-  pauseBtn.disabled = false;
-  stopBtn.disabled = false;
+  // 解析開始時はボタンを非活性化
+  playBtn.disabled = true;
+  pauseBtn.disabled = true;
+  stopBtn.disabled = true;
 
   const sampleRate = buffer.sampleRate;
   const data = buffer.getChannelData(0);
@@ -234,7 +248,7 @@ async function analyzeAudio(buffer) {
   errors = [];
 
   progressContainer.style.display = "block";
-  progressBar.style.width = "0%";
+  progressBar.style.width = "0%"
 
   const totalFrames = Math.floor((data.length - frameSize) / hopSize);
   let processedFrames = 0;
@@ -254,13 +268,26 @@ async function analyzeAudio(buffer) {
     }
 
     processedFrames++;
-    progressBar.style.width = (processedFrames / totalFrames) * 100 + "%";
+
+    // 【修正】100フレームごとに処理を細切れにしてブラウザのUIスレッドを解放する（画面フリーズ防止）
+    if (processedFrames % 100 === 0) {
+      progressBar.style.width = (processedFrames / totalFrames) * 100 + "%";
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
   }
 
   progressBar.style.width = "100%";
-  setTimeout(() => progressContainer.style.display = "none", 500);
+  setTimeout(() => progressContainer.style.display = "none", 300);
 
-  if (notes.length === 0) return;
+  if (notes.length === 0) {
+    alert("ピッチを検出できませんでした。");
+    return;
+  }
+
+  // 解析完了後にコントロールを活性化
+  playBtn.disabled = false;
+  pauseBtn.disabled = false;
+  stopBtn.disabled = false;
 
   timeMax = notes[notes.length - 1].time;
 
@@ -293,10 +320,13 @@ async function analyzeAudio(buffer) {
   const noteCount = maxMidi - minMidi + 1;
   const rollHeight = rowHeight * noteCount;
 
+  // 【修正】鍵盤Canvasのwidth解像度も明示（引き伸ばしによるボケ防止）
+  keysCanvas.width = 80;
+  keysCanvas.height = rollHeight;
+
   timelineCanvas.width = width;
   rollCanvas.width = width;
   rollCanvas.height = rollHeight;
-  keysCanvas.height = rollHeight;
   errorCanvas.width = width;
 
   drawKeyboard();
@@ -305,8 +335,13 @@ async function analyzeAudio(buffer) {
   drawErrorGraph();
 }
 
-playBtn.addEventListener("click", () => {
+playBtn.addEventListener("click", async () => {
   if (!audioCtx || !audioBuffer) return;
+
+  // 【修正】モバイル・ブラウザ向け対策：AudioContextを有効化
+  if (audioCtx.state === 'suspended') {
+    await audioCtx.resume();
+  }
 
   if (sourceNode) {
     sourceNode.stop();
@@ -316,6 +351,15 @@ playBtn.addEventListener("click", () => {
   sourceNode = audioCtx.createBufferSource();
   sourceNode.buffer = audioBuffer;
   sourceNode.connect(audioCtx.destination);
+
+  // 【修正】最後まで自然に再生し終えたら自動で停止処理を行う
+  sourceNode.onended = () => {
+    const currentPlayhead = isPaused ? pauseOffset : audioCtx.currentTime - startTime;
+    // ほぼ再生終了位置、かつユーザーによる意図的な一時停止ではない場合
+    if (!isPaused && currentPlayhead >= timeMax - 0.1) {
+      handleStop();
+    }
+  };
 
   if (isPaused) {
     startTime = audioCtx.currentTime - pauseOffset;
@@ -327,30 +371,46 @@ playBtn.addEventListener("click", () => {
     sourceNode.start();
   }
 
-  requestAnimationFrame(animatePlayhead);
+  // 【修正】既存の重複ループがあれば破棄して1つだけ動かす（連打バグ対策）
+  if (animationId) cancelAnimationFrame(animationId);
+  animationId = requestAnimationFrame(animatePlayhead);
 });
 
 pauseBtn.addEventListener("click", () => {
   if (!sourceNode) return;
   pauseOffset = audioCtx.currentTime - startTime;
+
+  // 【修正】一時停止時は無駄な描画を止める
+  if (animationId) {
+    cancelAnimationFrame(animationId);
+    animationId = null;
+  }
+
   sourceNode.stop();
   sourceNode.disconnect();
   sourceNode = null;
   isPaused = true;
 });
 
-stopBtn.addEventListener("click", () => {
+// 【修正】停止処理を安全な共通関数に統合
+function handleStop() {
   if (sourceNode) {
     sourceNode.stop();
     sourceNode.disconnect();
     sourceNode = null;
+  }
+  if (animationId) {
+    cancelAnimationFrame(animationId);
+    animationId = null;
   }
   isPaused = false;
   pauseOffset = 0;
   startTime = 0;
   drawPianoRoll();
   drawErrorGraph();
-});
+}
+
+stopBtn.addEventListener("click", handleStop);
 
 function yin(buffer, sampleRate) {
   const tauMax = Math.floor(buffer.length / 2);
@@ -526,10 +586,12 @@ function animatePlayhead() {
   drawPianoRoll();
   drawPlayhead();
   drawErrorGraph();
-  requestAnimationFrame(animatePlayhead);
+
+  // 【修正】無駄なループを回さない安全設計
+  if (startTime !== 0 && !isPaused) {
+    animationId = requestAnimationFrame(animatePlayhead);
+  }
 }
 </script>
 </body>
 </html>
-
-
