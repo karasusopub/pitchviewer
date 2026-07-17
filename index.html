@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Pitch Viewer (Mic + File + Mobile)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  body { font-family: sans-serif; background: #222; color: #eee; margin:0; }
+
+  #controls {
+    padding: 10px;
+    background: #333;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  #controls button, #controls input[type=file] {
+    font-size: 18px;
+    padding: 10px 20px;
+    background: #555;
+    border: none;
+    color: #fff;
+    border-radius: 6px;
+  }
+
+  #progressContainer {
+    width: 100%;
+    height: 20px;
+    background: #444;
+    border: 1px solid #666;
+    display: none;
+  }
+  #progressBar {
+    width: 0%;
+    height: 100%;
+    background: #0af;
+    transition: width 0.1s linear;
+  }
+
+  #container {
+    display: flex;
+    flex-direction: row;
+    height: calc(100vh - 150px);
+  }
+
+  #scrollArea {
+    overflow-y: auto;
+    overflow-x: auto;
+    display: flex;
+    flex-direction: row;
+    width: 100%;
+    border-left: 2px solid #444;
+    touch-action: pan-x pan-y;
+  }
+
+  #keyboard {
+    width: 80px;
+    background: #111;
+    border-right: 2px solid #444;
+  }
+
+  #pianoWrapper {
+    display: flex;
+    flex-direction: column;
+  }
+
+  canvas {
+    display: block;
+  }
+</style>
+</head>
+<body>
+
+<div id="controls">
+  <button id="micStartBtn">🎤 録音開始</button>
+  <button id="micStopBtn" disabled>■ 録音停止</button>
+  <button id="playBtn" disabled>▶ 再生</button>
+  <button id="pauseBtn" disabled>一時停止</button>
+  <button id="stopBtn" disabled>停止</button>
+
+  <input type="file" id="fileInput" accept="audio/*">
+</div>
+
+<div id="progressContainer"><div id="progressBar"></div></div>
+
+<div id="container">
+  <div id="scrollArea">
+    <div id="keyboard"><canvas id="keys"></canvas></div>
+    <div id="pianoWrapper">
+      <canvas id="timeline" height="40"></canvas>
+      <canvas id="pianoroll"></canvas>
+      <canvas id="error" height="200"></canvas>
+    </div>
+  </div>
+</div>
+
+<script>
+let audioCtx = null;
+let audioBuffer = null;
+let sourceNode = null;
+let isPaused = false;
+let pauseOffset = 0;
+let startTime = 0;
+
+let notes = [];
+let longNotes = [];
+let errors = [];
+let timeMax = 0;
+let minMidi = 40;
+let maxMidi = 80;
+let maxCent = 100;
+
+let micStream = null;
+let micRecorder = null;
+let micChunks = [];
+const MIC_LIMIT = 10 * 1000;
+
+const isMobile = window.innerWidth < 600;
+const rowHeight = isMobile ? 12 : 20;
+
+const micStartBtn = document.getElementById("micStartBtn");
+const micStopBtn = document.getElementById("micStopBtn");
+const fileInput = document.getElementById("fileInput");
+
+const playBtn = document.getElementById("playBtn");
+const pauseBtn = document.getElementById("pauseBtn");
+const stopBtn = document.getElementById("stopBtn");
+
+const progressContainer = document.getElementById("progressContainer");
+const progressBar = document.getElementById("progressBar");
+
+const keysCanvas = document.getElementById("keys");
+const keysCtx = keysCanvas.getContext("2d");
+
+const timelineCanvas = document.getElementById("timeline");
+const timelineCtx = timelineCanvas.getContext("2d");
+
+const rollCanvas = document.getElementById("pianoroll");
+const rollCtx = rollCanvas.getContext("2d");
+
+const errorCanvas = document.getElementById("error");
+const errorCtx = errorCanvas.getContext("2d");
+
+fileInput.addEventListener("change", async e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const arrayBuffer = await file.arrayBuffer();
+  audioCtx = new AudioContext();
+  audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+  analyzeAudio(audioBuffer);
+});
+
+micStartBtn.addEventListener("click", async () => {
+  micStartBtn.disabled = true;
+  micStopBtn.disabled = false;
+
+  micChunks = [];
+  audioCtx = new AudioContext();
+
+  micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  micRecorder = new MediaRecorder(micStream);
+
+  micRecorder.ondataavailable = e => micChunks.push(e.data);
+
+  micRecorder.start();
+
+  setTimeout(() => {
+    if (micRecorder.state === "recording") micRecorder.stop();
+  }, MIC_LIMIT);
+
+  micRecorder.onstop = async () => {
+    micStopBtn.disabled = true;
+    micStartBtn.disabled = false;
+
+    const blob = new Blob(micChunks, { type: "audio/webm" });
+    const arrayBuffer = await blob.arrayBuffer();
+    audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+
+    analyzeAudio(audioBuffer);
+  };
+});
+
+micStopBtn.addEventListener("click", () => {
+  if (micRecorder && micRecorder.state === "recording") {
+    micRecorder.stop();
+  }
+});
+
+async function analyzeAudio(buffer) {
+  playBtn.disabled = false;
+  pauseBtn.disabled = false;
+  stopBtn.disabled = false;
+
+  const sampleRate = buffer.sampleRate;
+  const data = buffer.getChannelData(0);
+
+  const frameSize = 2048;
+  const hopSize = 512;
+
+  notes = [];
+  errors = [];
+
+  progressContainer.style.display = "block";
+  progressBar.style.width = "0%";
+
+  const totalFrames = Math.floor((data.length - frameSize) / hopSize);
+  let processedFrames = 0;
+
+  for (let i = 0; i + frameSize <= data.length; i += hopSize) {
+    const frame = data.subarray(i, i + frameSize);
+    const freq = yin(frame, sampleRate);
+    if (freq) {
+      const midi = freqToMidi(freq);
+      const time = i / sampleRate;
+
+      const noteFreq = midiToFreq(midi);
+      const centError = 1200 * Math.log2(freq / noteFreq);
+
+      notes.push({ time, midi });
+      errors.push({ time, cent: centError });
+    }
+
+    processedFrames++;
+    progressBar.style.width = (processedFrames / totalFrames) * 100 + "%";
+  }
+
+  progressBar.style.width = "100%";
+  setTimeout(() => progressContainer.style.display = "none", 500);
+
+  if (notes.length === 0) return;
+
+  timeMax = notes[notes.length - 1].time;
+
+  longNotes = [];
+  let current = null;
+  const hopTime = hopSize / sampleRate;
+
+  for (let i = 0; i < notes.length; i++) {
+    const n = notes[i];
+    if (!current) {
+      current = { midi: n.midi, start: n.time, end: n.time + hopTime };
+      continue;
+    }
+    if (n.midi === current.midi) {
+      current.end = n.time + hopTime;
+    } else {
+      longNotes.push(current);
+      current = { midi: n.midi, start: n.time, end: n.time + hopTime };
+    }
+  }
+  if (current) longNotes.push(current);
+
+  const pxPerSec = 200;
+  const width = Math.max(1200, timeMax * pxPerSec);
+
+  const noteCount = maxMidi - minMidi + 1;
+  const rollHeight = rowHeight * noteCount;
+
+  timelineCanvas.width = width;
+  rollCanvas.width = width;
+  rollCanvas.height = rollHeight;
+  keysCanvas.height = rollHeight;
+  errorCanvas.width = width;
+
+  drawKeyboard();
+  drawTimeline();
+  drawPianoRoll();
+  drawErrorGraph();
+}
+
+playBtn.addEventListener("click", () => {
+  if (!audioCtx || !audioBuffer) return;
+
+  if (sourceNode) {
+    sourceNode.stop();
+    sourceNode.disconnect();
+  }
+
+  sourceNode = audioCtx.createBufferSource();
+  sourceNode.buffer = audioBuffer;
+  sourceNode.connect(audioCtx.destination);
+
+  if (isPaused) {
+    startTime = audioCtx.currentTime - pauseOffset;
+    sourceNode.start(0, pauseOffset);
+    isPaused = false;
+  } else {
+    startTime = audioCtx.currentTime;
+    pauseOffset = 0;
+    sourceNode.start();
+  }
+
+  requestAnimationFrame(animatePlayhead);
+});
+
+pauseBtn.addEventListener("click", () => {
+  if (!sourceNode) return;
+  pauseOffset = audioCtx.currentTime - startTime;
+  sourceNode.stop();
+  sourceNode.disconnect();
+  sourceNode = null;
+  isPaused = true;
+});
+
+stopBtn.addEventListener("click", () => {
+  if (sourceNode) {
+    sourceNode.stop();
+    sourceNode.disconnect();
+    sourceNode = null;
+  }
+  isPaused = false;
+  pauseOffset = 0;
+  startTime = 0;
+  drawPianoRoll();
+  drawErrorGraph();
+});
+
+function yin(buffer, sampleRate) {
+  const tauMax = Math.floor(buffer.length / 2);
+  const yinBuf = new Float32Array(tauMax);
+  let sum = 0;
+
+  for (let tau = 1; tau < tauMax; tau++) {
+    let diff = 0;
+    for (let j = 0; j < tauMax; j++) {
+      const d = buffer[j] - buffer[j + tau];
+      diff += d * d;
+    }
+    yinBuf[tau] = diff;
+  }
+
+  yinBuf[0] = 1;
+  for (let tau = 1; tau < tauMax; tau++) {
+    sum += yinBuf[tau];
+    yinBuf[tau] *= tau / sum;
+  }
+
+  const threshold = 0.15;
+  let tau = 0;
+  for (let t = 2; t < tauMax; t++) {
+    if (yinBuf[t] < threshold) {
+      tau = t;
+      while (t + 1 < tauMax && yinBuf[t + 1] < yinBuf[t]) {
+        t++;
+        tau = t;
+      }
+      break;
+    }
+  }
+  if (tau === 0) return null;
+
+  return sampleRate / tau;
+}
+
+function freqToMidi(freq) {
+  return Math.round(69 + 12 * Math.log2(freq / 440));
+}
+
+function midiToFreq(midi) {
+  return 440 * Math.pow(2, (midi - 69) / 12);
+}
+
+function isBlackKey(midi) {
+  const n = midi % 12;
+  return (n === 1 || n === 3 || n === 6 || n === 8 || n === 10);
+}
+
+function drawKeyboard() {
+  const names = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+
+  keysCtx.clearRect(0, 0, keysCanvas.width, keysCanvas.height);
+
+  for (let m = minMidi; m <= maxMidi; m++) {
+    const y = (maxMidi - m) * rowHeight;
+    const name = names[m % 12];
+
+    keysCtx.fillStyle = isBlackKey(m) ? '#2a2a2a' : '#555';
+    keysCtx.fillRect(0, y, 80, rowHeight);
+
+    keysCtx.fillStyle = '#fff';
+    keysCtx.fillText(name, 5, y + rowHeight - 4);
+  }
+}
+
+function drawTimeline() {
+  timelineCtx.clearRect(0, 0, timelineCanvas.width, timelineCanvas.height);
+  timelineCtx.fillStyle = '#ccc';
+  timelineCtx.font = '12px sans-serif';
+
+  for (let t = 0; t <= timeMax; t += 0.5) {
+    const x = (t / timeMax) * timelineCanvas.width;
+    timelineCtx.fillText(t.toFixed(1), x, 20);
+  }
+}
+
+function drawRollGrid() {
+  for (let m = minMidi; m <= maxMidi; m++) {
+    const y = (maxMidi - m) * rowHeight;
+
+    rollCtx.fillStyle = isBlackKey(m) ? "#2a2a2a" : "#1e1e1e";
+    rollCtx.fillRect(0, y, rollCanvas.width, rowHeight);
+
+    rollCtx.strokeStyle = "#333";
+    rollCtx.beginPath();
+    rollCtx.moveTo(0, y);
+    rollCtx.lineTo(rollCanvas.width, y);
+    rollCtx.stroke();
+  }
+}
+
+function drawPianoRoll() {
+  rollCtx.clearRect(0, 0, rollCanvas.width, rollCanvas.height);
+
+  drawRollGrid();
+
+  longNotes.forEach(n => {
+    const x = (n.start / timeMax) * rollCanvas.width;
+    const x2 = (n.end / timeMax) * rollCanvas.width;
+    const w = x2 - x;
+
+    const y = (maxMidi - n.midi) * rowHeight;
+
+    rollCtx.fillStyle = '#0af';
+    rollCtx.fillRect(x, y, w, rowHeight);
+  });
+}
+
+function drawErrorGraph() {
+  errorCtx.clearRect(0, 0, errorCanvas.width, errorCanvas.height);
+
+  errorCtx.strokeStyle = '#ccc';
+  errorCtx.beginPath();
+  errorCtx.moveTo(0, errorCanvas.height / 2);
+  errorCtx.lineTo(errorCanvas.width, errorCanvas.height / 2);
+  errorCtx.stroke();
+
+  errorCtx.strokeStyle = '#f55';
+  errorCtx.beginPath();
+
+  errors.forEach((e, i) => {
+    const x = (e.time / timeMax) * errorCanvas.width;
+    const y = errorCanvas.height / 2 - (e.cent / maxCent) * (errorCanvas.height / 2);
+
+    if (i === 0) errorCtx.moveTo(x, y);
+    else errorCtx.lineTo(x, y);
+  });
+
+  errorCtx.stroke();
+}
+
+function drawPlayhead() {
+  if (!audioCtx || startTime === 0) return;
+
+  const playPos = (isPaused ? pauseOffset : audioCtx.currentTime - startTime);
+  if (playPos < 0 || playPos > timeMax) return;
+
+  const x = (playPos / timeMax) * rollCanvas.width;
+
+  rollCtx.strokeStyle = '#ff0';
+  rollCtx.lineWidth = 2;
+  rollCtx.beginPath();
+  rollCtx.moveTo(x, 0);
+  rollCtx.lineTo(x, rollCanvas.height);
+  rollCtx.stroke();
+}
+
+function animatePlayhead() {
+  drawPianoRoll();
+  drawPlayhead();
+  drawErrorGraph();
+  requestAnimationFrame(animatePlayhead);
+}
+</script>
+</body>
+</html>
