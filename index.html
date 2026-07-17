@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<title>Pitch Viewer (Mic + File + Mobile) - Fixed</title>
+<title>Pitch Viewer (Fixed Height + Scroll)</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <style>
   body { font-family: sans-serif; background: #222; color: #eee; margin:0; }
@@ -52,29 +52,49 @@
     transition: width 0.1s linear;
   }
 
+  /* 画面全体のレイアウト */
   #container {
     display: flex;
-    flex-direction: row;
+    flex-direction: column;
     height: calc(100vh - 180px);
   }
 
-  #scrollArea {
-    overflow-y: auto;
+  /* 横スクロール（時間軸）を担当するエリア */
+  #scrollAreaX {
     overflow-x: auto;
+    width: 100%;
+    touch-action: pan-x pan-y;
+  }
+
+  /* タイムライン用のヘッダー（左側に鍵盤用の80pxの空白を作る） */
+  #timelineHeader {
     display: flex;
     flex-direction: row;
-    width: 100%;
-    border-left: 2px solid #444;
-    touch-action: pan-x pan-y;
+    background: #222;
+  }
+  #timelineSpacer {
+    width: 80px;
+    flex-shrink: 0;
+    border-right: 2px solid #444;
+    background: #111;
+  }
+
+  /* 【新規】上下スクロール（音高軸）を担当するエリア：高さを400pxに固定 */
+  #scrollAreaY {
+    overflow-y: auto;
+    max-height: 400px; /* ★ここでピアノロールの高さを固定（好みに合わせて変更可） */
+    display: flex;
+    flex-direction: row;
+    border-bottom: 2px solid #444;
   }
 
   #keyboard {
     width: 80px;
     background: #111;
     border-right: 2px solid #444;
-    margin-top: 40px; /* ★右側のtimeline(height=40)と同じ高さの余白を入れる */
+    flex-shrink: 0;
   }
-  
+
   #pianoWrapper {
     display: flex;
     flex-direction: column;
@@ -82,6 +102,12 @@
 
   canvas {
     display: block;
+  }
+
+  /* エラーグラフはピアノロールの下（スクロールの外）に配置 */
+  #errorArea {
+    width: 100%;
+    overflow-x: hidden; /* 上の横スクロールと同期させる場合は調整 */
   }
 </style>
 </head>
@@ -102,13 +128,28 @@
 <div id="progressContainer"><div id="progressBar"></div></div>
 
 <div id="container">
-  <div id="scrollArea">
-    <div id="keyboard"><canvas id="keys"></canvas></div>
-    <div id="pianoWrapper">
+  <!-- 横スクロールエリア -->
+  <div id="scrollAreaX">
+    
+    <!-- タイムライン部分（鍵盤の真上を避けて配置） -->
+    <div id="timelineHeader">
+      <div id="timelineSpacer"></div>
       <canvas id="timeline" height="40"></canvas>
-      <canvas id="pianoroll"></canvas>
+    </div>
+    
+    <!-- 【新規】上下スクロールエリア（鍵盤とピアノロールをセットでスクロール） -->
+    <div id="scrollAreaY">
+      <div id="keyboard"><canvas id="keys"></canvas></div>
+      <div id="pianoWrapper">
+        <canvas id="pianoroll"></canvas>
+      </div>
+    </div>
+
+    <!-- エラーエリアも横幅を合わせるためここに入れる -->
+    <div id="errorArea">
       <canvas id="error" height="200"></canvas>
     </div>
+
   </div>
 </div>
 
@@ -119,7 +160,7 @@ let sourceNode = null;
 let isPaused = false;
 let pauseOffset = 0;
 let startTime = 0;
-let animationId = null; // 【追加】再生ヘッドのアニメーション管理用
+let animationId = null;
 
 let notes = [];
 let longNotes = [];
@@ -163,6 +204,8 @@ const rollCtx = rollCanvas.getContext("2d");
 
 const errorCanvas = document.getElementById("error");
 const errorCtx = errorCanvas.getContext("2d");
+
+const scrollAreaY = document.getElementById("scrollAreaY");
 
 fileInput.addEventListener("change", async e => {
   const file = e.target.files[0];
@@ -214,7 +257,6 @@ micStartBtn.addEventListener("click", async () => {
       recBlinkInterval = null;
     }
 
-    // ストリームのトラックをすべて停止してマイクの使用中アイコンを消す
     if (micStream) {
       micStream.getTracks().forEach(track => track.stop());
     }
@@ -234,7 +276,6 @@ micStopBtn.addEventListener("click", () => {
 });
 
 async function analyzeAudio(buffer) {
-  // 解析開始時はボタンを非活性化
   playBtn.disabled = true;
   pauseBtn.disabled = true;
   stopBtn.disabled = true;
@@ -270,7 +311,6 @@ async function analyzeAudio(buffer) {
 
     processedFrames++;
 
-    // 【修正】100フレームごとに処理を細切れにしてブラウザのUIスレッドを解放する（画面フリーズ防止）
     if (processedFrames % 100 === 0) {
       progressBar.style.width = (processedFrames / totalFrames) * 100 + "%";
       await new Promise(resolve => setTimeout(resolve, 0));
@@ -285,7 +325,6 @@ async function analyzeAudio(buffer) {
     return;
   }
 
-  // 解析完了後にコントロールを活性化
   playBtn.disabled = false;
   pauseBtn.disabled = false;
   stopBtn.disabled = false;
@@ -321,7 +360,6 @@ async function analyzeAudio(buffer) {
   const noteCount = maxMidi - minMidi + 1;
   const rollHeight = rowHeight * noteCount;
 
-  // 【修正】鍵盤Canvasのwidth解像度も明示（引き伸ばしによるボケ防止）
   keysCanvas.width = 80;
   keysCanvas.height = rollHeight;
 
@@ -334,12 +372,14 @@ async function analyzeAudio(buffer) {
   drawTimeline();
   drawPianoRoll();
   drawErrorGraph();
+
+  // 【自動スクロール】解析直後、自動的に真ん中の音域あたりにスクロールさせる
+  scrollAreaY.scrollTop = rollHeight / 2 - 200;
 }
 
 playBtn.addEventListener("click", async () => {
   if (!audioCtx || !audioBuffer) return;
 
-  // 【修正】モバイル・ブラウザ向け対策：AudioContextを有効化
   if (audioCtx.state === 'suspended') {
     await audioCtx.resume();
   }
@@ -353,10 +393,8 @@ playBtn.addEventListener("click", async () => {
   sourceNode.buffer = audioBuffer;
   sourceNode.connect(audioCtx.destination);
 
-  // 【修正】最後まで自然に再生し終えたら自動で停止処理を行う
   sourceNode.onended = () => {
     const currentPlayhead = isPaused ? pauseOffset : audioCtx.currentTime - startTime;
-    // ほぼ再生終了位置、かつユーザーによる意図的な一時停止ではない場合
     if (!isPaused && currentPlayhead >= timeMax - 0.1) {
       handleStop();
     }
@@ -372,7 +410,6 @@ playBtn.addEventListener("click", async () => {
     sourceNode.start();
   }
 
-  // 【修正】既存の重複ループがあれば破棄して1つだけ動かす（連打バグ対策）
   if (animationId) cancelAnimationFrame(animationId);
   animationId = requestAnimationFrame(animatePlayhead);
 });
@@ -381,7 +418,6 @@ pauseBtn.addEventListener("click", () => {
   if (!sourceNode) return;
   pauseOffset = audioCtx.currentTime - startTime;
 
-  // 【修正】一時停止時は無駄な描画を止める
   if (animationId) {
     cancelAnimationFrame(animationId);
     animationId = null;
@@ -393,7 +429,6 @@ pauseBtn.addEventListener("click", () => {
   isPaused = true;
 });
 
-// 【修正】停止処理を安全な共通関数に統合
 function handleStop() {
   if (sourceNode) {
     sourceNode.stop();
@@ -588,7 +623,6 @@ function animatePlayhead() {
   drawPlayhead();
   drawErrorGraph();
 
-  // 【修正】無駄なループを回さない安全設計
   if (startTime !== 0 && !isPaused) {
     animationId = requestAnimationFrame(animatePlayhead);
   }
