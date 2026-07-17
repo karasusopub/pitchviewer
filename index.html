@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<title>Pitch Viewer (Fixed & Scrolled + Countdown)</title>
+<title>Pitch Viewer (Fixed 8 Octaves & 1.5 Octave View)</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <style>
   body { font-family: sans-serif; background: #222; color: #eee; margin:0; }
@@ -78,10 +78,10 @@
     background: #111;
   }
 
-  /* 【修正】1オクターブ半（18行×20px ＝ 360px）がピッタリ収まる固定表示高 */
+  /* 【最重要】VIEW矩形：常に1オクターブ半（18行×20px ＝ 360px）の高さに固定 */
   #scrollAreaY {
-    overflow-y: scroll; /* 常にスクロールバーを表示 */
-    height: 360px;       /* 1オクターブ半を同時に見られる高さに完全固定 */
+    overflow-y: scroll; 
+    height: 360px;       
     display: flex;
     flex-direction: row;
     border-bottom: 2px solid #444;
@@ -158,10 +158,15 @@ let animationId = null;
 let notes = [];
 let longNotes = [];
 let errors = [];
-let timeMax = 0;
-let minMidi = 40;
-let maxMidi = 80;
+let timeMax = 10; // デフォルト10秒（解析後に変動）
 let maxCent = 100;
+
+// 【仕様固定】1オクターブ（C0:12）から 8オクターブ（C8:108）までを網羅
+const minMidi = 12;
+const maxMidi = 108;
+const rowHeight = 20; // 1行20px固定（18行で360px＝1オクターブ半）
+const totalRows = maxMidi - minMidi + 1;
+const rollHeight = rowHeight * totalRows; // 97行×20px = 1940pxの巨大キャンバス
 
 let micStream = null;
 let micRecorder = null;
@@ -169,9 +174,6 @@ let micChunks = [];
 let recBlinkInterval = null;
 
 const MIC_LIMIT = 10 * 1000;
-
-const isMobile = window.innerWidth < 600;
-const rowHeight = isMobile ? 12 : 20;
 
 const micStartBtn = document.getElementById("micStartBtn");
 const micStopBtn = document.getElementById("micStopBtn");
@@ -182,23 +184,45 @@ const pauseBtn = document.getElementById("pauseBtn");
 const stopBtn = document.getElementById("stopBtn");
 
 const recIndicator = document.getElementById("recIndicator");
-
 const progressContainer = document.getElementById("progressContainer");
 const progressBar = document.getElementById("progressBar");
 
 const keysCanvas = document.getElementById("keys");
 const keysCtx = keysCanvas.getContext("2d");
-
 const timelineCanvas = document.getElementById("timeline");
 const timelineCtx = timelineCanvas.getContext("2d");
-
 const rollCanvas = document.getElementById("pianoroll");
 const rollCtx = rollCanvas.getContext("2d");
-
 const errorCanvas = document.getElementById("error");
 const errorCtx = errorCanvas.getContext("2d");
-
 const scrollAreaY = document.getElementById("scrollAreaY");
+
+// 【初期化】起動時にキャンバスサイズを確定させ、C4を画面中央にする
+window.addEventListener("DOMContentLoaded", () => {
+  initCanvasDimensions(1200); // 初期横幅
+  drawKeyboard();
+  drawTimeline();
+  drawPianoRoll();
+  drawErrorGraph();
+  scrollToCenterMidi(60); // C4(MIDI 60)を画面中央に
+});
+
+function initCanvasDimensions(width) {
+  keysCanvas.width = 80;
+  keysCanvas.height = rollHeight;
+  timelineCanvas.width = width;
+  rollCanvas.width = width;
+  rollCanvas.height = rollHeight;
+  errorCanvas.width = width;
+}
+
+// 特定のMIDIノートを360pxのVIEWの中央にスクロールする関数
+function scrollToCenterMidi(midi) {
+  // 上からのピクセル位置。maxMidiが一番上
+  const targetY = (maxMidi - midi) * rowHeight;
+  // VIEWの高さ(360px)の半分(180px)だけ引いて中央に寄せる
+  scrollAreaY.scrollTop = Math.max(0, targetY - 180 + (rowHeight / 2));
+}
 
 fileInput.addEventListener("change", async e => {
   const file = e.target.files[0];
@@ -209,11 +233,9 @@ fileInput.addEventListener("change", async e => {
   analyzeAudio(audioBuffer);
 });
 
-// 【新規】カウントダウン付き録音関数
+// カウントダウン付き録音
 micStartBtn.addEventListener("click", async () => {
   micStartBtn.disabled = true;
-  
-  // カウントダウン処理 (3秒)
   let count = 3;
   micStartBtn.textContent = `⏳ ${count}...`;
   
@@ -224,12 +246,11 @@ micStartBtn.addEventListener("click", async () => {
     } else {
       clearInterval(countdownInterval);
       micStartBtn.textContent = `🎤 録音開始`;
-      startActualRecording(); // 録音の本処理へ
+      startActualRecording();
     }
   }, 1000);
 });
 
-// 実際の録音開始処理
 async function startActualRecording() {
   micStopBtn.disabled = false;
   micChunks = [];
@@ -317,8 +338,11 @@ async function analyzeAudio(buffer) {
       const noteFreq = midiToFreq(midi);
       const centError = 1200 * Math.log2(freq / noteFreq);
 
-      notes.push({ time, midi });
-      errors.push({ time, cent: centError });
+      // 1〜8オクターブ（minMidi〜maxMidi）の範囲内のみ記録
+      if (midi >= minMidi && midi <= maxMidi) {
+        notes.push({ time, midi });
+        errors.push({ time, cent: centError });
+      }
     }
 
     processedFrames++;
@@ -333,7 +357,15 @@ async function analyzeAudio(buffer) {
   setTimeout(() => progressContainer.style.display = "none", 300);
 
   if (notes.length === 0) {
-    alert("ピッチを検出できませんでした。");
+    alert("ピッチを検出できませんでした（または想定外の音域です）。");
+    // 音がなくてもC4中央で再描画
+    timeMax = buffer.duration;
+    initCanvasDimensions(Math.max(1200, timeMax * 200));
+    drawKeyboard();
+    drawTimeline();
+    drawPianoRoll();
+    drawErrorGraph();
+    scrollToCenterMidi(60);
     return;
   }
 
@@ -365,48 +397,23 @@ async function analyzeAudio(buffer) {
   const pxPerSec = 200;
   const width = Math.max(1200, timeMax * pxPerSec);
 
-  const midiValues = notes.map(n => n.midi);
-  
-  // 【修正】スクロール幅を必ず確保するため、音域の最低・最高幅を最低でも「3オクターブ（36半音）」に強制拡張
-  let detectedMin = Math.min(...midiValues);
-  let detectedMax = Math.max(...midiValues);
-  if ((detectedMax - detectedMin) < 36) {
-    const center = Math.floor((detectedMin + detectedMax) / 2);
-    minMidi = center - 18;
-    maxMidi = center + 18;
-  } else {
-    minMidi = detectedMin - 2;
-    maxMidi = detectedMax + 2;
-  }
-
-  const noteCount = maxMidi - minMidi + 1;
-  const rollHeight = rowHeight * noteCount;
-
-  keysCanvas.width = 80;
-  keysCanvas.height = rollHeight;
-
-  timelineCanvas.width = width;
-  rollCanvas.width = width;
-  rollCanvas.height = rollHeight;
-  errorCanvas.width = width;
+  // キャンバスサイズを更新（高さは常にロール高さで固定）
+  initCanvasDimensions(width);
 
   drawKeyboard();
   drawTimeline();
   drawPianoRoll();
   drawErrorGraph();
 
-  // 音符のある位置へ中央寄せスクロール（360px表示枠の中心に持ってくる）
-  const averageMidi = midiValues.reduce((a, b) => a + b, 0) / midiValues.length;
-  const targetY = (maxMidi - averageMidi) * rowHeight - 180;
-  scrollAreaY.scrollTop = Math.max(0, targetY);
+  // 検出された音の平均値、または単音ならその音を中心にスクロール。なければC4(60)へ
+  const midiValues = notes.map(n => n.midi);
+  const averageMidi = midiValues.length > 0 ? (midiValues.reduce((a, b) => a + b, 0) / midiValues.length) : 60;
+  scrollToCenterMidi(averageMidi);
 }
 
 playBtn.addEventListener("click", async () => {
   if (!audioCtx || !audioBuffer) return;
-
-  if (audioCtx.state === 'suspended') {
-    await audioCtx.resume();
-  }
+  if (audioCtx.state === 'suspended') await audioCtx.resume();
 
   if (sourceNode) {
     sourceNode.stop();
@@ -441,12 +448,7 @@ playBtn.addEventListener("click", async () => {
 pauseBtn.addEventListener("click", () => {
   if (!sourceNode) return;
   pauseOffset = audioCtx.currentTime - startTime;
-
-  if (animationId) {
-    cancelAnimationFrame(animationId);
-    animationId = null;
-  }
-
+  if (animationId) { cancelAnimationFrame(animationId); animationId = null; }
   sourceNode.stop();
   sourceNode.disconnect();
   sourceNode = null;
@@ -454,29 +456,20 @@ pauseBtn.addEventListener("click", () => {
 });
 
 function handleStop() {
-  if (sourceNode) {
-    sourceNode.stop();
-    sourceNode.disconnect();
-    sourceNode = null;
-  }
-  if (animationId) {
-    cancelAnimationFrame(animationId);
-    animationId = null;
-  }
+  if (sourceNode) { sourceNode.stop(); sourceNode.disconnect(); sourceNode = null; }
+  if (animationId) { cancelAnimationFrame(animationId); animationId = null; }
   isPaused = false;
   pauseOffset = 0;
   startTime = 0;
   drawPianoRoll();
   drawErrorGraph();
 }
-
 stopBtn.addEventListener("click", handleStop);
 
 function yin(buffer, sampleRate) {
   const tauMax = Math.floor(buffer.length / 2);
   const yinBuf = new Float32Array(tauMax);
   let sum = 0;
-
   for (let tau = 1; tau < tauMax; tau++) {
     let diff = 0;
     for (let j = 0; j < tauMax; j++) {
@@ -485,38 +478,26 @@ function yin(buffer, sampleRate) {
     }
     yinBuf[tau] = diff;
   }
-
   yinBuf[0] = 1;
   for (let tau = 1; tau < tauMax; tau++) {
     sum += yinBuf[tau];
     yinBuf[tau] *= tau / sum;
   }
-
   const threshold = 0.15;
   let tau = 0;
   for (let t = 2; t < tauMax; t++) {
     if (yinBuf[t] < threshold) {
       tau = t;
-      while (t + 1 < tauMax && yinBuf[t + 1] < yinBuf[t]) {
-        t++;
-        tau = t;
-      }
+      while (t + 1 < tauMax && yinBuf[t + 1] < yinBuf[t]) { t++; tau = t; }
       break;
     }
   }
   if (tau === 0) return null;
-
   return sampleRate / tau;
 }
 
-function freqToMidi(freq) {
-  return Math.round(69 + 12 * Math.log2(freq / 440));
-}
-
-function midiToFreq(midi) {
-  return 440 * Math.pow(2, (midi - 69) / 12);
-}
-
+function freqToMidi(freq) { return Math.round(69 + 12 * Math.log2(freq / 440)); }
+function midiToFreq(midi) { return 440 * Math.pow(2, (midi - 69) / 12); }
 function isBlackKey(midi) {
   const n = midi % 12;
   return (n === 1 || n === 3 || n === 6 || n === 8 || n === 10);
@@ -524,9 +505,8 @@ function isBlackKey(midi) {
 
 function drawKeyboard() {
   const names = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
-
   keysCtx.clearRect(0, 0, keysCanvas.width, keysCanvas.height);
-  keysCtx.font = isMobile ? '10px sans-serif' : '12px sans-serif';
+  keysCtx.font = '12px sans-serif';
 
   let rowCount = 0;
   for (let m = maxMidi; m >= minMidi; m--) {
@@ -552,7 +532,6 @@ function drawTimeline() {
   timelineCtx.clearRect(0, 0, timelineCanvas.width, timelineCanvas.height);
   timelineCtx.fillStyle = '#ccc';
   timelineCtx.font = '12px sans-serif';
-
   for (let t = 0; t <= timeMax; t += 0.5) {
     const x = (t / timeMax) * timelineCanvas.width;
     timelineCtx.fillText(t.toFixed(1), x, 20);
@@ -563,33 +542,24 @@ function drawRollGrid() {
   let rowCount = 0;
   for (let m = maxMidi; m >= minMidi; m--) {
     const y = rowCount * rowHeight;
-
     rollCtx.fillStyle = isBlackKey(m) ? "#2a2a2a" : "#1e1e1e";
     rollCtx.fillRect(0, y, rollCanvas.width, rowHeight);
-
     rollCtx.strokeStyle = "#333";
-    rollCtx.beginPath();
-    rollCtx.moveTo(0, y);
-    rollCtx.lineTo(rollCanvas.width, y);
-    rollCtx.stroke();
-
+    rollCtx.beginPath(); rollCtx.moveTo(0, y); rollCtx.lineTo(rollCanvas.width, y); rollCtx.stroke();
     rowCount++;
   }
 }
 
 function drawPianoRoll() {
   rollCtx.clearRect(0, 0, rollCanvas.width, rollCanvas.height);
-
   drawRollGrid();
-
   const names = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
-  rollCtx.font = isMobile ? '10px sans-serif' : '12px sans-serif';
+  rollCtx.font = '12px sans-serif';
 
   longNotes.forEach(n => {
     const x = (n.start / timeMax) * rollCanvas.width;
     const x2 = (n.end / timeMax) * rollCanvas.width;
     const w = x2 - x;
-
     const y = (maxMidi - n.midi) * rowHeight;
 
     rollCtx.fillStyle = '#0af';
@@ -597,64 +567,42 @@ function drawPianoRoll() {
 
     const name = names[n.midi % 12];
     const octave = Math.floor(n.midi / 12) - 1;
-    const label = name + octave;
-
     rollCtx.fillStyle = '#fff';
-    rollCtx.fillText(label, x + 3, y + rowHeight - 4);
+    rollCtx.fillText(name + octave, x + 3, y + rowHeight - 4);
   });
 }
 
 function drawErrorGraph() {
   errorCtx.clearRect(0, 0, errorCanvas.width, errorCanvas.height);
-
   errorCtx.fillStyle = '#fff';
-  errorCtx.font = isMobile ? '12px sans-serif' : '14px sans-serif';
+  errorCtx.font = '14px sans-serif';
   errorCtx.fillText("ピッチ誤差（cent）", 10, 20);
 
   errorCtx.strokeStyle = '#ccc';
-  errorCtx.beginPath();
-  errorCtx.moveTo(0, errorCanvas.height / 2);
-  errorCtx.lineTo(errorCanvas.width, errorCanvas.height / 2);
-  errorCtx.stroke();
+  errorCtx.beginPath(); errorCtx.moveTo(0, errorCanvas.height / 2); errorCtx.lineTo(errorCanvas.width, errorCanvas.height / 2); errorCtx.stroke();
 
   errorCtx.strokeStyle = '#f55';
   errorCtx.beginPath();
-
   errors.forEach((e, i) => {
     const x = (e.time / timeMax) * errorCanvas.width;
     const y = errorCanvas.height / 2 - (e.cent / maxCent) * (errorCanvas.height / 2);
-
-    if (i === 0) errorCtx.moveTo(x, y);
-    else errorCtx.lineTo(x, y);
+    if (i === 0) errorCtx.moveTo(x, y); else errorCtx.lineTo(x, y);
   });
-
   errorCtx.stroke();
 }
 
 function drawPlayhead() {
   if (!audioCtx || startTime === 0) return;
-
   const playPos = (isPaused ? pauseOffset : audioCtx.currentTime - startTime);
   if (playPos < 0 || playPos > timeMax) return;
-
   const x = (playPos / timeMax) * rollCanvas.width;
-
-  rollCtx.strokeStyle = '#ff0';
-  rollCtx.lineWidth = 2;
-  rollCtx.beginPath();
-  rollCtx.moveTo(x, 0);
-  rollCtx.lineTo(x, rollCanvas.height);
-  rollCtx.stroke();
+  rollCtx.strokeStyle = '#ff0'; rollCtx.lineWidth = 2;
+  rollCtx.beginPath(); rollCtx.moveTo(x, 0); rollCtx.lineTo(x, rollCanvas.height); rollCtx.stroke();
 }
 
 function animatePlayhead() {
-  drawPianoRoll();
-  drawPlayhead();
-  drawErrorGraph();
-
-  if (startTime !== 0 && !isPaused) {
-    animationId = requestAnimationFrame(animatePlayhead);
-  }
+  drawPianoRoll(); drawPlayhead(); drawErrorGraph();
+  if (startTime !== 0 && !isPaused) animationId = requestAnimationFrame(animatePlayhead);
 }
 </script>
 </body>
