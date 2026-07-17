@@ -23,6 +23,15 @@
     border-radius: 6px;
   }
 
+  #recIndicator {
+    display:none;
+    color:#ff4444;
+    font-size:22px;
+    font-weight:bold;
+    padding:10px;
+    text-align:center;
+  }
+
   #progressContainer {
     width: 100%;
     height: 20px;
@@ -40,7 +49,7 @@
   #container {
     display: flex;
     flex-direction: row;
-    height: calc(100vh - 150px);
+    height: calc(100vh - 180px);
   }
 
   #scrollArea {
@@ -81,6 +90,8 @@
   <input type="file" id="fileInput" accept="audio/*">
 </div>
 
+<div id="recIndicator">● REC</div>
+
 <div id="progressContainer"><div id="progressBar"></div></div>
 
 <div id="container">
@@ -113,6 +124,8 @@ let maxCent = 100;
 let micStream = null;
 let micRecorder = null;
 let micChunks = [];
+let recBlinkInterval = null;
+
 const MIC_LIMIT = 10 * 1000;
 
 const isMobile = window.innerWidth < 600;
@@ -125,6 +138,8 @@ const fileInput = document.getElementById("fileInput");
 const playBtn = document.getElementById("playBtn");
 const pauseBtn = document.getElementById("pauseBtn");
 const stopBtn = document.getElementById("stopBtn");
+
+const recIndicator = document.getElementById("recIndicator");
 
 const progressContainer = document.getElementById("progressContainer");
 const progressBar = document.getElementById("progressBar");
@@ -164,6 +179,13 @@ micStartBtn.addEventListener("click", async () => {
 
   micRecorder.start();
 
+  // ★ 録音インジケーター ON
+  recIndicator.style.display = "block";
+  recBlinkInterval = setInterval(() => {
+    recIndicator.style.visibility =
+      (recIndicator.style.visibility === "hidden") ? "visible" : "hidden";
+  }, 500);
+
   setTimeout(() => {
     if (micRecorder.state === "recording") micRecorder.stop();
   }, MIC_LIMIT);
@@ -171,6 +193,14 @@ micStartBtn.addEventListener("click", async () => {
   micRecorder.onstop = async () => {
     micStopBtn.disabled = true;
     micStartBtn.disabled = false;
+
+    // ★ 録音インジケーター OFF
+    recIndicator.style.display = "none";
+    recIndicator.style.visibility = "visible";
+    if (recBlinkInterval) {
+      clearInterval(recBlinkInterval);
+      recBlinkInterval = null;
+    }
 
     const blob = new Blob(micChunks, { type: "audio/webm" });
     const arrayBuffer = await blob.arrayBuffer();
@@ -252,6 +282,10 @@ async function analyzeAudio(buffer) {
 
   const pxPerSec = 200;
   const width = Math.max(1200, timeMax * pxPerSec);
+
+  const midiValues = notes.map(n => n.midi);
+  minMidi = Math.min(...midiValues) - 2;
+  maxMidi = Math.max(...midiValues) + 2;
 
   const noteCount = maxMidi - minMidi + 1;
   const rollHeight = rowHeight * noteCount;
@@ -369,6 +403,7 @@ function drawKeyboard() {
   const names = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
 
   keysCtx.clearRect(0, 0, keysCanvas.width, keysCanvas.height);
+  keysCtx.font = isMobile ? '10px sans-serif' : '12px sans-serif';
 
   for (let m = minMidi; m <= maxMidi; m++) {
     const y = (maxMidi - m) * rowHeight;
@@ -379,6 +414,12 @@ function drawKeyboard() {
 
     keysCtx.fillStyle = '#fff';
     keysCtx.fillText(name, 5, y + rowHeight - 4);
+
+    if (name === 'C') {
+      const octave = Math.floor(m / 12) - 1;
+      keysCtx.fillStyle = '#0af';
+      keysCtx.fillText("C" + octave, 40, y + rowHeight - 4);
+    }
   }
 }
 
@@ -413,6 +454,9 @@ function drawPianoRoll() {
 
   drawRollGrid();
 
+  const names = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+  rollCtx.font = isMobile ? '10px sans-serif' : '12px sans-serif';
+
   longNotes.forEach(n => {
     const x = (n.start / timeMax) * rollCanvas.width;
     const x2 = (n.end / timeMax) * rollCanvas.width;
@@ -422,11 +466,22 @@ function drawPianoRoll() {
 
     rollCtx.fillStyle = '#0af';
     rollCtx.fillRect(x, y, w, rowHeight);
+
+    const name = names[n.midi % 12];
+    const octave = Math.floor(n.midi / 12) - 1;
+    const label = name + octave;
+
+    rollCtx.fillStyle = '#fff';
+    rollCtx.fillText(label, x + 3, y + rowHeight - 4);
   });
 }
 
 function drawErrorGraph() {
   errorCtx.clearRect(0, 0, errorCanvas.width, errorCanvas.height);
+
+  errorCtx.fillStyle = '#fff';
+  errorCtx.font = isMobile ? '12px sans-serif' : '14px sans-serif';
+  errorCtx.fillText("ピッチ誤差（cent）", 10, 20);
 
   errorCtx.strokeStyle = '#ccc';
   errorCtx.beginPath();
@@ -468,8 +523,4 @@ function animatePlayhead() {
   drawPianoRoll();
   drawPlayhead();
   drawErrorGraph();
-  requestAnimationFrame(animatePlayhead);
-}
-</script>
-</body>
-</html>
+  requestAnimationFrame(animatePlay
