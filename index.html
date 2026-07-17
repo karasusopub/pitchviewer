@@ -179,7 +179,6 @@ micStartBtn.addEventListener("click", async () => {
 
   micRecorder.start();
 
-  // ★ 録音インジケーター ON
   recIndicator.style.display = "block";
   recBlinkInterval = setInterval(() => {
     recIndicator.style.visibility =
@@ -194,7 +193,6 @@ micStartBtn.addEventListener("click", async () => {
     micStopBtn.disabled = true;
     micStartBtn.disabled = false;
 
-    // ★ 録音インジケーター OFF
     recIndicator.style.display = "none";
     recIndicator.style.visibility = "visible";
     if (recBlinkInterval) {
@@ -523,4 +521,8 @@ function animatePlayhead() {
   drawPianoRoll();
   drawPlayhead();
   drawErrorGraph();
-  requestAnimationFrame(animatePlay
+  requestAnimationFrame(animatePlayhead);
+}
+</script>
+</body>
+</html>
