@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<title>Pitch Viewer (Fixed & Scrolled)</title>
+<title>Pitch Viewer (Fixed & Scrolled + Countdown)</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <style>
   body { font-family: sans-serif; background: #222; color: #eee; margin:0; }
@@ -78,10 +78,10 @@
     background: #111;
   }
 
-  /* 【上下スクロールエリア】高さを400pxに固定 */
+  /* 【修正】1オクターブ半（18行×20px ＝ 360px）がピッタリ収まる固定表示高 */
   #scrollAreaY {
-    overflow-y: auto;
-    max-height: 400px; /* ここでピアノロールの表示高さを固定 */
+    overflow-y: scroll; /* 常にスクロールバーを表示 */
+    height: 360px;       /* 1オクターブ半を同時に見られる高さに完全固定 */
     display: flex;
     flex-direction: row;
     border-bottom: 2px solid #444;
@@ -209,10 +209,29 @@ fileInput.addEventListener("change", async e => {
   analyzeAudio(audioBuffer);
 });
 
+// 【新規】カウントダウン付き録音関数
 micStartBtn.addEventListener("click", async () => {
   micStartBtn.disabled = true;
-  micStopBtn.disabled = false;
+  
+  // カウントダウン処理 (3秒)
+  let count = 3;
+  micStartBtn.textContent = `⏳ ${count}...`;
+  
+  const countdownInterval = setInterval(() => {
+    count--;
+    if (count > 0) {
+      micStartBtn.textContent = `⏳ ${count}...`;
+    } else {
+      clearInterval(countdownInterval);
+      micStartBtn.textContent = `🎤 録音開始`;
+      startActualRecording(); // 録音の本処理へ
+    }
+  }, 1000);
+});
 
+// 実際の録音開始処理
+async function startActualRecording() {
+  micStopBtn.disabled = false;
   micChunks = [];
   if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 
@@ -260,7 +279,7 @@ micStartBtn.addEventListener("click", async () => {
 
     analyzeAudio(audioBuffer);
   };
-});
+}
 
 micStopBtn.addEventListener("click", () => {
   if (micRecorder && micRecorder.state === "recording") {
@@ -347,8 +366,18 @@ async function analyzeAudio(buffer) {
   const width = Math.max(1200, timeMax * pxPerSec);
 
   const midiValues = notes.map(n => n.midi);
-  minMidi = Math.min(...midiValues) - 2;
-  maxMidi = Math.max(...midiValues) + 2;
+  
+  // 【修正】スクロール幅を必ず確保するため、音域の最低・最高幅を最低でも「3オクターブ（36半音）」に強制拡張
+  let detectedMin = Math.min(...midiValues);
+  let detectedMax = Math.max(...midiValues);
+  if ((detectedMax - detectedMin) < 36) {
+    const center = Math.floor((detectedMin + detectedMax) / 2);
+    minMidi = center - 18;
+    maxMidi = center + 18;
+  } else {
+    minMidi = detectedMin - 2;
+    maxMidi = detectedMax + 2;
+  }
 
   const noteCount = maxMidi - minMidi + 1;
   const rollHeight = rowHeight * noteCount;
@@ -366,9 +395,9 @@ async function analyzeAudio(buffer) {
   drawPianoRoll();
   drawErrorGraph();
 
-  // 音符のある位置へ自動スクロール
+  // 音符のある位置へ中央寄せスクロール（360px表示枠の中心に持ってくる）
   const averageMidi = midiValues.reduce((a, b) => a + b, 0) / midiValues.length;
-  const targetY = (maxMidi - averageMidi) * rowHeight - 200;
+  const targetY = (maxMidi - averageMidi) * rowHeight - 180;
   scrollAreaY.scrollTop = Math.max(0, targetY);
 }
 
@@ -493,7 +522,6 @@ function isBlackKey(midi) {
   return (n === 1 || n === 3 || n === 6 || n === 8 || n === 10);
 }
 
-// 【修正】高音（maxMidi）から低音（minMidi）へ順番に降順描画してズレを完全解消
 function drawKeyboard() {
   const names = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
 
@@ -531,7 +559,6 @@ function drawTimeline() {
   }
 }
 
-// 【修正】高音（maxMidi）から低音（minMidi）へ降順描画して位置を完璧に統一
 function drawRollGrid() {
   let rowCount = 0;
   for (let m = maxMidi; m >= minMidi; m--) {
@@ -563,7 +590,6 @@ function drawPianoRoll() {
     const x2 = (n.end / timeMax) * rollCanvas.width;
     const w = x2 - x;
 
-    // ピアノロール上での描画位置計算（上から何番目のノートか）
     const y = (maxMidi - n.midi) * rowHeight;
 
     rollCtx.fillStyle = '#0af';
